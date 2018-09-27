@@ -1,0 +1,176 @@
+---
+title: "Senior Thesis"
+author: "Lathan Liou"
+output: html_notebook
+---
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*.
+
+---
+
+September 21, 2018: First attempt to build a Genome Scraper program
+I first had to install Docker and RSelenium. 
+
+Then once Docker was installed and running, I ran this command in the RStudio shell: 
+docker run -d -p 4445:4444 selenium/standalone-chrome
+
+Then I ran the command docker ps to confirm that I had set up my Docker container. 
+
+What I'm doing now is creating an object in R that contains the information about the selenium browser we’ve created in a docker container. Then we’re opening the browser.
+
+```{r}
+library(RSelenium) #load up
+
+#access our selenium browser
+
+remDr <- RSelenium::remoteDriver(remoteServerAddr = "127.0.0.1",
+                                 port = 4445L,
+                                 browserName = "chrome")
+
+remDr$open()
+```
+
+The idea is to basically use RSelenium to identify and navigate to the correct page, and a combination of rvest and XML to download info from the pages of interest.
+
+```{r}
+#load up necessary packages
+library(rvest)
+library(xml2)
+library(tidyverse)
+
+#navigate to SuperFamily
+remDr$navigate("http://www.supfam.org/SUPERFAMILY/cgi-bin/taxonomic_gen_list.cgi")
+
+#let's check if it worked
+remDr$screenshot(display = TRUE)
+```
+
+Next we want to create a list of genomes.
+
+```{r}
+#extracts names of organisms
+eukgen <- xml2::read_html(remDr$getPageSource()[[1]]) %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_children() %>%
+  rvest::html_text() %>%
+  dplyr::data_frame(organism = .)
+
+#let's clean this up
+eukgen <- eukgen[!apply(eukgen == "", 1, all),] #remove blank elements
+eukgen <- eukgen[!grepl("\\.|_", eukgen$organism),] #remove rubbish elements
+eukgen <- eukgen[1:532,] #subset for only the eukaryotes
+eukgen <- eukgen[!grepl("1|2|3|5|76", eukgen$organism),] #remove numbers, there's probably a cleaner way to do this
+eukgen <- eukgen[grepl("[^a-z]", eukgen$organism),] #remove elements starting with lowercase
+eukgen <- eukgen[!grepl("MIT|CL Brener|Friedlin", eukgen$organism),] #remove miscellaneous stuff
+nrow(eukgen) #confirm I've successfully retrieved all names from Superfamily database
+```
+
+Now that we have the table of organism names, we somehow want to automate the process to download the genome sequences for each of those organisms. 
+
+```{r}
+#let's try to get this working for just one genome
+element <- remDr$findElement(using = 'css selector', 'a[href*="hs"]')
+element$clickElement() #click on anything that has our CSS selector in it, should just be the first option
+
+#check where we are
+remDr$screenshot(display = TRUE)
+
+scraplinks <- function(url){
+    # Create an html document from the url
+    webpage <- xml2::read_html(url)
+    # Extract the URLs
+    url_ <- webpage %>%
+        rvest::html_nodes("a") %>%
+        rvest::html_attr("href")
+    # Extract the link text
+    link_ <- webpage %>%
+        rvest::html_nodes("a") %>%
+        rvest::html_text()
+    return(data_frame(link = link_, url = url_))
+}
+
+organism_html <- xml2::read_html(remDr$getPageSource()[[1]])
+
+organism_links <- organism_html %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_attr("href")
+
+organism_link_name <- organism_html %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_text()
+
+organism_FASTA <- cbind(organism_links, organism_link_name)
+organism_FASTA <- as.data.frame(organism_FASTA)
+
+organism_FASTA <- organism_FASTA %>%
+  filter(str_detect(organism_link_name, 'Fasta format sequences'))
+
+#now we want to navigate to the FASTA sequence
+FASTA <- remDr$findElement(using = 'css selector', 'a[href*="genome_sequence"]')
+html_attr(FASTA)
+remDr$screenshot(display = TRUE)
+```
+
+September 25, 2018: Second attempt to build a Genome Scraper program
+
+```{r}
+#initialize our master dataframe
+orgdf <- data.frame(matrix(ncol = 3, nrow = 442))
+colnames(orgdf) <- c("Organism", "Code", "FASTALink")
+
+supfam <- read_html("http://www.supfam.org/SUPERFAMILY/cgi-bin/taxonomic_gen_list.cgi")
+
+#extract organism names
+orgnames <- supfam %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_children() %>%
+  rvest::html_text() %>%
+  dplyr::data_frame(organism = .)
+
+#let's clean this up
+orgnames <- orgnames[!apply(orgnames == "", 1, all),] #remove blank elements
+orgnames <- orgnames[!grepl("\\.|_", orgnames$organism),] #remove rubbish elements
+orgnames <- orgnames[1:531,] #subset for only the eukaryotes
+orgnames <- orgnames[grepl("[^a-z]", orgnames$organism),] #remove elements starting with lowercase
+orgnames <- orgnames[!grepl("MIT|CL Brener|Friedlin", orgnames$organism),] #remove miscellaneous stuff
+orgnames <- orgnames[!grepl("[v]{1}[0-9]{3}", orgnames$organism),] #remove v followed by 3 numbers
+orgnames <- orgnames[!grepl("[v]{1}[0-9]{1}", orgnames$organism),] #remove v followed by 1 number
+orgnames <- orgnames[!grepl("10|22|280|55|76", orgnames$organism),] #remove weird numbers, there's probably a cleaner way to do this
+orgnames <- orgnames[nchar(orgnames$organism) > 1,] #remove the single numbers
+nrow(orgnames) #confirm I've successfully retrieved all names from Superfamily database
+
+#populate organism names
+orgdf[,1] <- orgnames
+
+orgcodes <- supfam %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_attr('href') %>%
+  dplyr::data_frame(code = .)
+
+#let's clean this up
+orgcodes <- orgcodes[-c(1:46),]
+orgcodes <- orgcodes[1:449,]
+orgcodes <- orgcodes[complete.cases(orgcodes),]
+nrow(orgcodes)
+
+#make small code parser function
+SFCodeParser <- function(x){
+  substring(x, 23)
+}
+
+#apply to all rows
+orgcodes <- lapply(orgcodes, SFCodeParser)
+
+#populate organism codes
+orgdf[,2] <- orgcodes
+
+#paste code into var=__
+lhs <- paste0("http://www.supfam.org/SUPERFAMILY/cgi-bin/save.cgi?var=")
+rhs <- paste0(";type=genome_sequence")
+orgdf <- orgdf %>%
+  mutate(FASTALink = paste0(lhs, Code, rhs))
+
+#done!
+```
+
+#curl
