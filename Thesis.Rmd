@@ -173,4 +173,119 @@ orgdf <- orgdf %>%
 #done!
 ```
 
-#curl
+Now that we have a table of all the eukaryotic organisms from SuperFamily as well as their download sequence, let's pick a few to extract. In this phase of the project, I'll try to start using BLAST to align sequences. 
+
+The sequences I'm going to work wtih for now are Gorilla gorilla (3), Hyaloperonospora arabidopsidis (439), and Pythium iwayamai (429). I chose these because Amanda's thesis did not use these genome sequences, so this will be new. These three will also be tests for the genome parser program I will write. 
+
+The first thing I'll do is curl to get these genomes and get their FASTA sequences. Because BLAST takes in .fasta files, I won't store the results of the curl in a dataframe, but rather save the results as separate .fasta files in my directory.
+
+```{r}
+library(RCurl)
+GenScrapeR <- function(data){
+  for(i in 1:nrow(data)){
+    download.file(data[i,3], destfile = paste(data[i,2], ".fasta"), method = "libcurl")
+  }
+}
+```
+
+October 9, 2018
+Right now, I need to get the FASTA sequences for the Mtn proteins. I'll get them from the 1+1=3 paper. I want to test out writing BLAST functions using one example FASTA sequence. 
+
+```{r}
+download.file(orgdf[429,3], destfile = paste(orgdf[429,2], ".fasta"), method = "libcurl")
+```
+
+The command line code I used was:
+SeniorThesis lathanliou$ makeblastdb -in zUU.fasta -parse_seqids -dbtype prot
+to turn a FASTA sequence into a BLAST database
+
+This was to run BLAST
+blastp -query mtnAYeast.fasta -db zUU.fasta -outfmt 10 -out zUU_mtnA.csv
+
+```{r}
+library(readr)
+#I made a CSV to interpret it more easily
+zUU_mtnA <- read_csv("~/Desktop/Senior Year/Thesis/SeniorThesis/zUU_mtnA.csv")
+```
+
+This link tells me how to interpret blast output
+http://www.metagenomics.wiki/tools/blast/blastn-output-format-6 
+
+This is a useful link for all the BLAST+ commands:
+https://www.ncbi.nlm.nih.gov/books/NBK279684/
+
+I want to get the BLASTed FASTA sequence back in my zUU. 
+
+My goal is to extract the sequence identifier from my top hit in the BLAST output. Then from the sequence identifier, extract the amino acid sequence from the original organism FASTA file.
+
+I wrote a function that looks for match and retrieves the index. I wrote another function to get the sequence from that index.
+
+```{r}
+#browseVignettes("Biostrings") This is the documentation for Biostrings
+
+#read FASTA into R
+library(Biostrings)
+library(stringr)
+find.match <- function(file, blast){
+  s <- readDNAStringSet(file)
+  v <- as.vector(names(s))
+  logic <- c()
+  name <- colnames(blast)[2]
+  name <- as.character(name)
+  for (i in 1:length(v)){
+    logic[i] <- str_detect(v[i], name)
+    if (str_detect(v[i], name) == TRUE) break
+  }
+  return(i)
+}
+
+#let's see if my function runs
+match <- find.match("zUU.fasta", zUU_mtnA)
+
+SeqExtract <- function(match){
+  list <- as.list(as.character(s[match]))
+  list[[1]]
+}
+
+SeqExtract(match)
+```
+
+Great, so now my goal is to be able to write a program that can loop through various files and run in order:
+blast the sequences
+extract the top hit blast sequence
+save the sequence in a dataframe (probably)
+
+Still using organism zUU, I want to blast all my mtn protein fasta files against zUU. 
+
+```{r}
+knitr::opts_knit$set("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt")
+setwd("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt")
+mtns <- list.files(pattern = "*.fasta")
+mtns
+
+outnames <- paste(unlist(sapply(mtns, strsplit, split = "*.fasta")), 
+                  ".out", sep = "")
+outnames
+
+makeblastdb <- function(infile){
+  paste("makeblastdb -in ", infile, " -parse_seqids -dbtype prot", sep = "")
+}
+
+blastp2seq <- function(infile, outfile){
+  paste("blastp -query ", infile, " -db ",
+                     outfile, " -outfmt 10 -out ", paste(sub("\\..*", "", infile),"_",sub("\\..*", "", outfile),".csv", sep = ""), sep = "")
+}
+
+cmds <- mapply(FUN = blastp2seq, infile = mtns, outfile = "zUU.fasta")
+cmds
+
+#try with just one
+a <- makeblastdb("zUU.fasta")
+system(a)
+
+system("blastp -query mtnX.fasta -db zUU.fasta -outfmt 10 -out mtnX_zUU.csv")
+```
+
+I'll eventually have to make a makeblastdb command. 
+makeblastdb -in zUU.fasta -parse_seqids -dbtype prot
+
