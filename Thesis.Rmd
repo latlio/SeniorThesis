@@ -226,28 +226,6 @@ I wrote a function that looks for match and retrieves the index. I wrote another
 #read FASTA into R
 library(Biostrings)
 library(stringr)
-find.match <- function(file, blast){
-  s <- readDNAStringSet(file)
-  v <- as.vector(names(s))
-  logic <- c()
-  name <- colnames(blast)[2]
-  name <- as.character(name)
-  for (i in 1:length(v)){
-    logic[i] <- str_detect(v[i], name)
-    if (str_detect(v[i], name) == TRUE) break
-  }
-  return(i)
-}
-
-#let's see if my function runs
-match <- find.match("zUU.fasta", zUU_mtnA)
-
-SeqExtract <- function(match){
-  list <- as.list(as.character(s[match]))
-  list[[1]]
-}
-
-SeqExtract(match)
 ```
 
 Great, so now my goal is to be able to write a program that can loop through various files and run in order:
@@ -258,8 +236,8 @@ save the sequence in a dataframe (probably)
 Still using organism zUU, I want to blast all my mtn protein fasta files against zUU. 
 
 ```{r}
-knitr::opts_knit$set("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt")
-setwd("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt")
+library(knitr)
+knitr::opts_chunk$set("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/")
 mtns <- list.files(pattern = "*.fasta")
 mtns
 
@@ -277,15 +255,185 @@ blastp2seq <- function(infile, outfile){
 }
 
 cmds <- mapply(FUN = blastp2seq, infile = mtns, outfile = "zUU.fasta")
-cmds
+cmds <- as.list(cmds)
 
-#try with just one
-a <- makeblastdb("zUU.fasta")
-system(a)
-
-system("blastp -query mtnX.fasta -db zUU.fasta -outfmt 10 -out mtnX_zUU.csv")
+#let's try for all the files
+for (i in 1:length(cmds)){
+  system(cmds[i][[1]])
+}
 ```
 
-I'll eventually have to make a makeblastdb command. 
-makeblastdb -in zUU.fasta -parse_seqids -dbtype prot
+I have all the BLAST files I want for organism zUU, and now I want to extract the top hit from each of them.
 
+```{r}
+knitr::opts_chunk$set(root.dir = "~/MtnProt/zUU/")
+zUU <- list.files(path = "~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/zUU/", pattern = "*.csv")
+
+zUU_match <- c()
+
+#read files into R
+#All <- lapply(zUU,function(i){
+ # read.csv(i, header = FALSE)
+#})
+#zUU <- gsub("\\..*", "", zUU)
+#names(All) <- gsub(".csv","", zUU)
+
+#the above data structure is too difficult to work with, let's try again
+list.zUU <- list()
+for (i in 1:length(zUU)){
+  list.zUU[[i]] <- read.csv(zUU[i])
+}
+zUU <- gsub("\\..*", "", zUU)
+names(list.zUU) <- zUU
+
+#get top hit blast results
+blasts <- c()
+for (i in 1:length(list.zUU)){
+ blasts[i] <- colnames(list.zUU[[i]])[2]
+}
+
+find.match2 <- function(file, blast){
+  s <- readDNAStringSet(file)
+  v <- as.vector(names(s))
+  logic <- c()
+  for (i in 1:length(v)){
+    logic[i] <- str_detect(v[i], blast)
+    if (str_detect(v[i], blast) == TRUE) break
+  }
+  return(i)
+}
+
+#get indices for top hit blasts
+for (i in 1:length(blasts)){
+  zUU_match[i] <- find.match2("zUU.fasta", blasts[i])
+}
+
+#extract sequences
+zUU_seq <- c()
+for (i in 1:length(zUU_match)){
+  zUU_seq[i] <- SeqExtract("zUU.fasta", zUU_match[i])
+}
+
+#let's create a nice list
+names(zUU_seq) <- zUU
+```
+
+October 16, 2018
+The goal for this week is to familiarize myself with the Bioconductor suite and have a non-convoluted set of functions that extract top hit BLAST sequences between organisms and all the mtn proteins under certain parameters. 
+
+Steps:
+1. makeblastdb -in zUU.fasta -parse_seqids -dbtype prot (eventually want to consider looping this command over all the fasta files of my organisms)
+
+2. blastp -query mtnAYeast.fasta -db zUU.fasta -outfmt 10 -out zUU_mtnA.csv (create a bunch of blast commands for each mtn protein and then loop across)
+
+3. Parse the blast files into R in an easily accessible format (read.blast from CHNOSZ). I'm using the parameters similarity > 30% and evalue < 1e-10. 
+
+4. Use the subjectID to extract sequence (I think still use the code that I wrote to match index from my parsed blast sequence to index of organism blast sequence, and retrieve the organism sequence associated with that index)
+
+```{r}
+setwd("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/")
+
+#mtns <- list.files(pattern = "*.fasta$")
+#mtns <- grep('mtn', mtns, value = TRUE)
+
+mtns <- list.files(pattern = "^mtn")
+
+#need tabular format
+blastp2seq6 <- function(infile, outfile){
+  paste("blastp -query ", infile, " -db ",
+                     outfile, " -outfmt 6 -out ", paste(sub("\\..*", "", infile),"_",sub("\\..*", "", outfile),".txt", sep = ""), sep = "")
+}
+
+cmds <- mapply(FUN = blastp2seq6, infile = mtns, outfile = "zUU.fasta")
+cmds <- as.list(cmds)
+```
+#let's try for all the files
+for (i in 1:length(cmds)){
+  system(cmds[i][[1]])
+}
+
+
+I manually move the text files of my BLAST to a folder of the organism (in this case zUU).
+
+```{r}
+setwd("~/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/zUU/")
+library(CHNOSZ)
+
+blastout <- list.files(pattern = "*.txt$")
+blastout <- as.list(blastout)
+
+read.blastseq <- function(blastfiles, similarity, evalue, max.hits = 1){
+  output <- read.blast(blastfiles, similarity = 30, evalue = 1e-10, max.hits = 1)
+  return(output$subjectId)
+}
+
+blastid <- c()
+
+library(purrr)
+blastid <- purrr::map(blastout, purrr::possibly(read.blastseq, otherwise = "N/A"))
+blastid
+
+#convert list format of blastid into vector
+blastidvec <- c()
+for(i in 1:length(blastid)){
+  blastidvec[i] <- blastid[[i]][1]
+}
+
+find.idmatch <- function(file, blastidvec){
+  s <- readDNAStringSet(file)
+  v <- as.vector(names(s))
+  logic <- matrix(0, nrow = length(v), ncol = length(blastidvec))
+  for (i in 1:length(v)){
+    for(j in 1:length(blastidvec)){
+      logic[i,j] <- str_detect(v[i], blastidvec[j])
+    }
+  }
+    #index <- which(logic != FALSE, arr.ind = TRUE)
+    #if (str_detect(v[i], blastidvec) == TRUE) break
+    index <- which(logic==1, arr.ind = T)[,1]
+    return(index)
+}
+
+#get indices for top hit blasts
+zUU_match <- find.idmatch("/Users/lathanliou/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/zUU.fasta", blastidvec)
+
+SeqExtract <- function(file, match){
+  s <- readDNAStringSet(file)
+  seq <- c()
+  list <- as.list(as.character(s[match]))
+  for(i in 1:length(match)){
+    seq[i] <- list[[i]]
+  }
+  return(seq)
+}
+
+zUU_seq <- SeqExtract("/Users/lathanliou/Desktop/Senior\ Year/Thesis/SeniorThesis/MtnProt/zUU.fasta", zUU_match)
+
+#it worked!
+
+#maybe I want to concatenate name of protein with sequence in a dataframe
+mtnzUU <- as.data.frame(matrix(unlist(as.character(blastout)), nrow = 12, byrow = T))
+
+#drop factor levels
+mtnzUU <- droplevels(mtnzUU)
+mtnzUU <- as.data.frame(mtnzUU)
+
+#subset mtnZUU to get appropriate names
+mtnzUU <- mtnzUU %>%
+  slice(as.vector(which(blastidvec != "N/A")))
+
+test <- cbind(mtnzUU, zUU_seq)
+```
+
+October 30, 2018
+Next step is to automate and get ALL blast sequences that passed filter between each organism and each mtn protein.
+
+Some challenges:
+I am potentially going to have to work with multiple directories:
+- a directory for my mtn proteins
+- a directory for all my organism FASTA sequences
+- an individual directory for each blast set between one organism and all mtn proteins (442x), I also have to learn the commands to make a new directory and store the results in that directory
+
+probably have to make a table of commands where each row is a different organism, and each column is the mtn protein such that any given cell with run the blastp command for the ith organism and the jth mtn protein
+
+So I'll have to figure out how to adjust my functions and commands to effectively use different directories. 
