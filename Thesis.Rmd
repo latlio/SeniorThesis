@@ -352,7 +352,6 @@ for (i in 1:length(cmds)){
   system(cmds[i][[1]])
 }
 
-
 I manually move the text files of my BLAST to a folder of the organism (in this case zUU).
 
 ```{r}
@@ -420,7 +419,7 @@ mtnzUU <- as.data.frame(mtnzUU)
 
 #subset mtnZUU to get appropriate names
 mtnzUU <- mtnzUU %>%
-  slice(as.vector(which(blastidvec != "N/A")))
+  dplyr::slice(as.vector(which(blastidvec != "N/A")))
 
 test <- cbind(mtnzUU, zUU_seq)
 ```
@@ -437,3 +436,28 @@ I am potentially going to have to work with multiple directories:
 probably have to make a table of commands where each row is a different organism, and each column is the mtn protein such that any given cell with run the blastp command for the ith organism and the jth mtn protein
 
 So I'll have to figure out how to adjust my functions and commands to effectively use different directories. 
+
+November 3, 2018
+Solution Workflow:
+- make directory for mtn proteins
+- in my list.files command, I have to specify the path
+- I have to create the blast commands for each mtn for each outfile (I should have 442*9 commands)
+- If I make a directory for each organism, then I have to find idmatch for each organism. Potentially I could use a paste to get the file name and compare it with each of the blastidvec (3978 elements); it'll probably be computationally intensive. Also, when doing the sequence extract, I have no way of extracting the sequences and being able to identify from which organism it came from. UNLESS, my id match also returns N/A's in the same order as the order of my proteins. In other words, I should have 442 sets of length 9 id matches.
+
+```{r}
+find.idmatch2 <- function(file, blastidvec){
+  s <- readDNAStringSet(file)
+  v <- as.vector(names(s))
+  logic <- matrix(0, nrow = length(v), ncol = length(blastidvec))
+  for (i in 1:length(v)){
+    for(j in 1:length(blastidvec)){
+      logic[i,j] <- str_detect(v[i], blastidvec[j])
+    }
+  }
+  #subset columns at every 10th column, 1:9, 10:19, etc.
+  #return the rows that contain a 1
+  #merge rows such that I have a complete row of all matches and non-matches for
+    index <- which(logic==1, arr.ind = T)[,1]
+    return(index)
+}
+```
