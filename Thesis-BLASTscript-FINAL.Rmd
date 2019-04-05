@@ -1,0 +1,375 @@
+---
+title: "Untitled"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#### Packages you need ####
+library(tidyverse)
+library(rvest)
+library(CHNOSZ)
+```
+
+# Scraping Your Database
+For my thesis, I'm scraping the Superfamily genome database for eukaryotic genomes. I'm using the rvest package to do html scraping. I also clean up the scraped results. 
+
+```{r}
+supfam <- read_html("http://www.supfam.org/SUPERFAMILY/cgi-bin/taxonomic_gen_list.cgi")
+
+#### Extract organism names ####
+orgnames <- supfam %>%
+  rvest::html_nodes("i") %>%
+  rvest::html_text() %>%
+  tibble(organism = .)
+
+#### Cleaning organism names ####
+orgnames <- orgnames %>%
+  dplyr::slice(1:451) %>% #filter to only eukaryotes
+  unique() #remove duplicate entries
+
+#remove erroneous entries
+orgnames <- orgnames[-c(178,183,196,338,347,362,401,411,416),]
+```
+
+From inspecting our scraped results, I expect 432 organisms, so I want to prepare a tibble that contains data on organism name and the fasta download link. Here I populate the organism names.
+```{r}
+#initialize our master dataframe
+orgdf <- data.frame(matrix(ncol = 3, nrow = 432))
+colnames(orgdf) <- c("Organism", "Code", "FASTALink")
+
+#populate organism names
+orgdf[,1] <- orgnames
+```
+
+The next thing is to get the codes so that we can extract the fasta file download link.
+```{r}
+#### Extract Organism Codes ####
+orgcodes <- supfam %>%
+  rvest::html_nodes("a") %>%
+  rvest::html_attr('href') %>%
+  tibble(code = .)
+
+#### Cleaning Organism Codes ####
+orgcodes <- orgcodes %>%
+  dplyr::slice(-1:-46) %>%
+  dplyr::slice(1:449) %>%
+  drop_na()
+
+#remove codes of duplicated organisms
+orgnames_dupl <- supfam %>%
+  rvest::html_nodes("i") %>%
+  rvest::html_text() %>%
+  tibble(organism = .)
+ind_dupl <- which(duplicated(orgnames_dupl))[1:10]
+orgcodes <- orgcodes[-ind_dupl,]
+
+#small code parser function specific to SupFam, substrings on 23rd character
+SFCodeParser <- function(x){
+  substring(x, 23)
+}
+
+#apply to all rows
+orgcodes <- lapply(orgcodes, SFCodeParser)
+
+#populate organism codes
+orgdf[,2] <- orgcodes
+
+#### Getting FASTA download link ####
+#paste code into var=__
+lhs <- paste0("http://www.supfam.org/SUPERFAMILY/cgi-bin/save.cgi?var=")
+rhs <- paste0(";type=genome_sequence")
+orgdf <- orgdf %>%
+  mutate(FASTALink = paste0(lhs, Code, rhs))
+```
+
+Now that I have the FASTA download links, I want to actually download the files. I can do that by writing a simple function that curls the links and downloads the files. It's important to note that doing this step will download 432 fasta files in your current working directory. If you want to organize your repository, you can create a separate repository for your genome files like I did. I called mine "SupFam Genomes".
+
+```{r}
+#write a function to curl all the genomes and save each one as it's own fasta file
+GenScrapeR <- function(data){
+  for(i in 1:nrow(data)){
+    download.file(data[i,3], destfile=paste(data[i,2],".fasta", sep = ""), method="libcurl")
+  }
+}
+
+GenScrapeR(orgdf)
+```
+
+# Iterate BLAST
+Great, now I have my data. The next thing I want to do is iterate BLAST searches between each of my 432 organisms and 9 mtn proteins (which I have downloaded separately) for a total of 3888 searches. Some logistical things to consider: you may have to change your blast directory by navigating to our bashrc file: gedit .bashrc
+
+Then you have to redefine your path via
+"export PATH = $PATH: #here write the absolute path of where your BLAST program is located"
+
+In the chunk below, I write some functions that generates the system commands to make BLAST databases and the ones that runs blastp.
+
+```{r}
+###USER changes these directories###
+blastDir <- "/home/lathan/programs/ncbi-blast-2.7.1+/bin/"
+queryDir <- "/home/lathan/Desktop/mtnProteins/"
+outfileDir <- "/home/lathan/Desktop/SupFamGenomes/"
+
+#function to generate commands to make a BLAST database
+gendb <- function(outfileDir, org){
+  paste(blastDir, "makeblastdb -in ", outfileDir, org, " -dbtype prot", sep = "")
+}
+
+#need tabular format, function to generate the BLAST executable commands
+blastp2seq6 <- function(infile, outfile, queryDir, outfileDir){
+  paste(blastDir, "blastp -query ", queryDir, infile, " -db ", outfileDir, outfile, " -outfmt 6 -out ",
+        paste(sub("\\..*", "", outfile), "_", sub("\\..*", "", infile),  ".txt", sep = ""), sep = "")
+}
+```
+
+Now I run the functions to make the commands.
+
+```{r}
+#### Queue data ####
+#get mtn proteins
+mtns <- list.files(path = "~/Desktop/mtnProteins", pattern = "^mtn")
+
+#get all genomes
+genomes <- list.files(path = "~/Desktop/SupFamGenomes", pattern = "\\.fasta$")
+
+#remove whitespace
+genomes <- str_squish(genomes)
+
+#### Run Commands ####
+#generate makeblastdb commands
+dbs <- mapply(FUN = gendb, outfileDir = outfileDir, org = genomes)
+
+n_org <- nrow(orgdf)
+
+#initialize tibble for commands
+cmds <- tibble(A = rep(0, n_org), 
+               B = rep(0, n_org),
+               C = rep(0, n_org),
+               D = rep(0, n_org),
+               K = rep(0, n_org),
+               N = rep(0, n_org),
+               P = rep(0, n_org),
+               W = rep(0, n_org),
+               X = rep(0, n_org))
+
+#generate BLAST commands for each mtn protein
+for(i in 1:length(mtns)){
+ cmds[,i] <- mapply(FUN = blastp2seq6, infile = mtns[i], outfile = genomes, queryDir = queryDir, outfileDir = outfileDir) 
+}
+```
+
+Now we execute the commands via system calls.
+
+```{r}
+#make databases
+for(i in 1:length(dbs)){
+  system(dbs[i][[1]])
+}
+```
+
+Again, feel free to make repositories for each of your BLAST searches. I organized my mtn protein, so I had a folder for all BLAST searches bewtween mtnA and the 432 organisms, between mtnB and the 432 organisms, etc. 
+
+```{r}
+#run blast commands
+for(i in 1:nrow(cmds)){
+  for(j in 1:ncol(cmds)){
+    system(cmds[i,j])
+  }
+}
+```
+
+# Extract Sequences of Top BLAST hits
+After running BLAST, I want to extract the sequences. Also, note that at this point, I personally already manually organized the BLAST results into separate repositories. Thus, in my code, you will find that I set my paths. However, if you don't organize by repositories, you can just use regex to find specific files.
+
+The following code extracts sequences working in a 432x9 space. It first finds an id match between top the blast hit and the genome database. It will then find the sequence corresponding to the id. 
+
+```{r}
+#### Functions ####
+#read blast files into R by subject id
+#USER can toggle similarity score, evalue, how max hits and the length threshold
+read.blastseq <- function(blastfiles, similarity, evalue, max.hits, length.threshold){
+  output <- read.blast(blastfiles, 
+                       similarity = 30, 
+                       evalue = 1e-5, 
+                       max.hits = 1, 
+                       min.length = floor(length.threshold*mtnlengths[i]))
+  return(output$subjectId)
+}
+
+#helper function to change character(0) to "N/A"
+empty_as_na <- function(x){
+    ifelse(identical(x, character(0)), "N/A", x)
+}
+
+#finds id match between blast hit and genome
+find.idmatch <- function(file, blastidvec){
+  s <- readAAStringSet(file)
+  v <- as.vector(names(s))
+  v <- gsub(" ", "", v)
+  which(str_detect(v, coll(blastidvec)))
+}
+
+#extracts sequence based on id match
+SeqExtract <- function(file, match){
+  s <- readAAStringSet(file)
+  seq <- c()
+  list <- as.list(as.character(s[match]))
+  for(i in 1:length(match)){
+    seq[i] <- list[[i]]
+  }
+  return(seq)
+}
+
+#### Set up paths (OPTIONAL depending on how USER organizes files) ####
+paths <- tibble(
+  Apath = "/home/lathan/Desktop/BlastResults/AGenome/",
+  Bpath = "/home/lathan/Desktop/BlastResults/BGenome/",
+  Cpath = "/home/lathan/Desktop/BlastResults/CGenome/",
+  Dpath = "/home/lathan/Desktop/BlastResults/DGenome/",
+  Kpath = "/home/lathan/Desktop/BlastResults/KGenome/",
+  Npath = "/home/lathan/Desktop/BlastResults/NGenome/",
+  Ppath = "/home/lathan/Desktop/BlastResults/PGenome/",
+  Wpath = "/home/lathan/Desktop/BlastResults/WGenome/",
+  Xpath = "/home/lathan/Desktop/BlastResults/XGenome/"
+)
+
+#initialize tibble where we will store blast files read into R
+blastout <- tibble(A = rep(0, n_org), 
+               B = rep(0, n_org),
+               C = rep(0, n_org),
+               D = rep(0, n_org),
+               K = rep(0, n_org),
+               N = rep(0, n_org),
+               P = rep(0, n_org),
+               W = rep(0, n_org),
+               X = rep(0, n_org))
+
+#iterate for all
+for(i in 1:nrow(blastout)){
+  blastout[,i] <- list.files(path = paths[1,i], pattern = "\\.txt$")
+}
+
+#modify blast file names to add the absolute path
+for(j in 1:ncol(blastout)){
+  for(i in 1:nrow(blastout)){
+    blastout[i,j] <- paste0(paths[1,j], blastout[i,j], sep = "")
+  }
+}
+
+#set up minimum lengths 
+mtnlengths <- c()
+mtnfilenames <- list.files(path = queryDir, pattern = "\\.fasta$")
+
+#rename mtn protein file paths
+for(i in 1:length(mtnfilenames)){
+  mtnfilenames[i] <- paste0(queryDir, mtnfilenames[i], sep = "")
+}
+
+#get lengths
+for(i in 1:length(mtnfilenames)){
+  mtnlengths[i] <- readAAStringSet(mtnfilenames[i]) %>% width()
+}
+
+#### Applying Functions ####
+for(i in 1:ncol(blastout)){
+  blastid <- purrr::map_dfc(blastout[,i], purrr::possibly(read.blastseq, ..5 = 0.8, otherwise = "N/A"))
+}
+
+blastid <- apply(blastid, 2, FUN=empty_as_na)
+
+#### NOTE: there is a discrepancy with how files are ordered, so below is the code to reorder ####
+#create target index
+blastoutcode <- list.files(path = paths[1,1], pattern = "\\.txt$")
+target <- gsub("\\_.*", "", blastoutBcode)
+
+#create reference index
+genref <- gsub(".fasta", "", genomes)
+
+#get reordered index
+indices <- c()
+for(i in 1:length(genref)){
+  indices[i] <- which(target == genref[i])
+}
+
+#initialize an id match table
+matches <- tibble(A = rep(0, n_org), 
+               B = rep(0, n_org),
+               C = rep(0, n_org),
+               D = rep(0, n_org),
+               K = rep(0, n_org),
+               N = rep(0, n_org),
+               P = rep(0, n_org),
+               W = rep(0, n_org),
+               X = rep(0, n_org))
+
+#get id matches
+for(j in 1:ncol(matches)){
+  for(i in 1:nrow(matches)){
+    if(blastid[,j][indices][i]=="N/A"){
+      next()
+    }
+    else{matches[i,j] <- find.idmatch(genomepath[i], blastid[,j][indices][i])
+    }
+  }
+}
+
+#initialize a sequence table
+sequences <- tibble(A = rep(0, n_org), 
+               B = rep(0, n_org),
+               C = rep(0, n_org),
+               D = rep(0, n_org),
+               K = rep(0, n_org),
+               N = rep(0, n_org),
+               P = rep(0, n_org),
+               W = rep(0, n_org),
+               X = rep(0, n_org))
+
+#get sequences
+for(j in 1:ncol(matches)){
+  for(i in 1:nrow(matches)){
+    if(is.na(matches[i,j])){
+      next()
+    }
+    else{
+      sequences[i,j] <- SeqExtract(genomepath[i], matches[i,j])
+    }
+  }
+}
+
+#get indices of removed names so that we can modify fasta organisms
+NA_indices <- which(is.na(sequences), arr.ind = TRUE)
+
+#get individual vectors of sequences so that we can make the fasta files, not pretty, but necessary for the write.fasta function to work
+seqA <- sequences[!is.na(sequences[,1]),1] 
+seqB <- sequences[!is.na(sequences[,2]),2]
+seqC <- sequences[!is.na(sequences[,3]),3]
+seqD <- sequences[!is.na(sequences[,4]),4]
+seqK <- sequences[!is.na(sequences[,5]),5] 
+seqN <- sequences[!is.na(sequences[,6]),6] 
+seqP <- sequences[!is.na(sequences[,7]),7] 
+seqW <- sequences[!is.na(sequences[,8]),8] 
+seqX <- sequences[!is.na(sequences[,9]),9]
+
+#### Write to FASTA ####
+seqA <- as.list(seqA)
+write.fasta(seq = seqA, names = speciesnames[-NA_indices[,1]], file.out = "seqA.fasta")
+seqB <- as.list(seqB)
+write.fasta(seq = seqB, names = speciesnames[-NA_indices[,2]], file.out = "seqB.fasta")
+seqC <- as.list(seqC)
+write.fasta(seq = seqC, names = speciesnames[-NA_indices[,3]], file.out = "seqC.fasta")
+seqD <- as.list(seqD)
+write.fasta(seq = seqD, names = speciesnames[-NA_indices[,4]], file.out = "seqD.fasta")
+seqK <- as.list(seqK)
+write.fasta(seq = seqK, names = speciesnames[-NA_indices[,5]], file.out = "seqK.fasta")
+seqN <- as.list(seqN)
+write.fasta(seq = seqN, names = speciesnames[-NA_indices[,6]], file.out = "seqN.fasta")
+seqP <- as.list(seqP)
+write.fasta(seq = seqP, names = speciesnames[-NA_indices[,7]], file.out = "seqP.fasta")
+seqW <- as.list(seqW)
+write.fasta(seq = seqW, names = speciesnames[-NA_indices[,8]], file.out = "seqW.fasta")
+seqX <- as.list(seqX)
+write.fasta(seq = seqX, names = speciesnames[-NA_indices[,9]], file.out = "seqX.fasta")
+```
+
+
